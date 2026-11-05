@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Crashes by NYC neighborhood</title>
+  <link href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    html, body, #map { margin: 0; height: 100%; width: 100%; }
+    body { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; color: #f4f1ea; }
+    .panel {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      z-index: 2;
+      width: min(360px, calc(100vw - 32px));
+      padding: 14px 16px 12px;
+      background: rgba(18, 20, 24, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+    p { margin: 0; font-family: "Avenir Next", "Segoe UI", sans-serif; font-size: 13px; line-height: 1.4; color: #c9c3b8; }
+    label { display: block; margin: 12px 0 6px; font-family: "Avenir Next", "Segoe UI", sans-serif; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: #9d978c; }
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: #121418;
+      color: #f4f1ea;
+      font: 15px "Avenir Next", "Segoe UI", sans-serif;
+    }
+    #year-total { margin-top: 10px; color: #f4f1ea; }
+    #year-note { margin-top: 4px; }
+    .legend { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; font-family: "Avenir Next", "Segoe UI", sans-serif; font-size: 13px; }
+    .swatch { display: flex; align-items: center; gap: 8px; }
+    .chip { width: 18px; height: 12px; border-radius: 2px; flex: none; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); }
+    #place { margin-top: 12px; min-height: 2.8em; color: #f4f1ea; }
+    .maplibregl-popup-content { color: #1b1a17; font-family: "Avenir Next", "Segoe UI", sans-serif; font-size: 13px; line-height: 1.45; }
+    .maplibregl-popup-content strong { font-family: "Iowan Old Style", Georgia, serif; font-size: 15px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <aside class="panel">
+    <h1>Crashes by neighborhood</h1>
+    <p>Motor vehicle crashes inside each NYC neighborhood, September 2016 through September 2026.</p>
+    <label for="year">Year</label>
+    <select id="year"></select>
+    <p id="year-total"></p>
+    <p id="year-note"></p>
+    <div class="legend" aria-label="Crashes in the neighborhood">
+      <div class="swatch"><span class="chip" style="background:#f4efe6"></span> 0</div>
+      <div class="swatch"><span class="chip" style="background:#f3d2a8"></span> 1 – 180</div>
+      <div class="swatch"><span class="chip" style="background:#ef9a4a"></span> 181 – 380</div>
+      <div class="swatch"><span class="chip" style="background:#d85a32"></span> 381 – 680</div>
+      <div class="swatch"><span class="chip" style="background:#a32020"></span> 681 – 1,100</div>
+      <div class="swatch"><span class="chip" style="background:#5c1010"></span> 1,101 or more</div>
+    </div>
+    <p id="place">Move over a neighborhood.</p>
+    <p id="map-error" hidden style="margin-top:10px;color:#ffb4b4;"></p>
+  </aside>
+
+  <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/pmtiles@4.3.0/dist/pmtiles.js"></script>
+  <script>
+    const protocol = new pmtiles.Protocol();
+    maplibregl.addProtocol("pmtiles", protocol.tile);
+
+    const tilesUrl = new URL("crashesbyneighborhood.pmtiles", window.location.href).href;
+    const yearSelect = document.getElementById("year");
+    const yearTotal = document.getElementById("year-total");
+    const yearNote = document.getElementById("year-note");
+    const place = document.getElementById("place");
+
+    // Counts of crashes that fell inside a neighborhood. The same scale is used
+    // for every year, so a darker neighborhood means more crashes, not a higher
+    // rank within that year. Breaks follow the full-year neighborhood distribution:
+    // about 180 is the lower quartile, 380 the median, 680 the upper quartile.
+    const fillColor = ["step", ["get", "crash_count"],
+      "#f4efe6",
+      1, "#f3d2a8",
+      181, "#ef9a4a",
+      381, "#d85a32",
+      681, "#a32020",
+      1101, "#5c1010"
+    ];
+
+    const matchedByYear = {
+      2016: 72540,
+      2017: 213862,
+      2018: 213877,
+      2019: 193572,
+      2020: 103697,
+      2021: 100747,
+      2022: 92943,
+      2023: 88910,
+      2024: 83454,
+      2025: 82280,
+      2026: 60225
+    };
+    const partialYearNote = {
+      2016: "2016 includes September through December only.",
+      2026: "2026 includes January through September only."
+    };
+
+    for (const year of Object.keys(matchedByYear)) {
+      const option = document.createElement("option");
+      option.value = year;
+      option.textContent = year === "2016"
+        ? "2016 (from September)"
+        : year === "2026"
+          ? "2026 (through September)"
+          : year;
+      if (year === "2025") option.selected = true;
+      yearSelect.appendChild(option);
+    }
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: "https://tiles.openfreemap.org/styles/positron",
+      center: [-73.94, 40.73],
+      zoom: 10,
+      hash: true
+    });
+    map.on("error", (event) => {
+      const note = document.getElementById("map-error");
+      note.hidden = false;
+      note.textContent = event.error ? event.error.message : "Map error";
+    });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
+
+    function yearFilter() {
+      return ["==", ["get", "year"], Number(yearSelect.value)];
+    }
+
+    function applyYear() {
+      const year = yearSelect.value;
+      const total = matchedByYear[year];
+      yearTotal.textContent = `${total.toLocaleString("en-US")} crashes fell inside a neighborhood.`;
+      yearNote.textContent = partialYearNote[year] || "Full calendar year.";
+      if (!map.getLayer("neighborhoods-fill")) return;
+      map.setFilter("neighborhoods-fill", yearFilter());
+      map.setFilter("neighborhoods-line", yearFilter());
+      place.textContent = "Move over a neighborhood.";
+    }
+
+    function escapeHtml(value) {
+      return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    }
+
+    function describe(props) {
+      const count = Number(props.crash_count || 0);
+      const crashes = count === 1 ? "1 crash" : `${count.toLocaleString("en-US")} crashes`;
+      return {
+        title: props.ntaname || "Neighborhood",
+        line: `${props.boroname || "New York City"} · ${props.year}`,
+        crashes
+      };
+    }
+
+    map.on("load", () => {
+      map.addSource("neighborhoods", {
+        type: "vector",
+        url: `pmtiles://${tilesUrl}`
+      });
+      map.addLayer({
+        id: "neighborhoods-fill",
+        type: "fill",
+        source: "neighborhoods",
+        "source-layer": "neighborhoods",
+        filter: yearFilter(),
+        paint: {
+          "fill-color": fillColor,
+          "fill-opacity": 0.86
+        }
+      });
+      map.addLayer({
+        id: "neighborhoods-line",
+        type: "line",
+        source: "neighborhoods",
+        "source-layer": "neighborhoods",
+        filter: yearFilter(),
+        paint: {
+          "line-color": "#3a2e28",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.3, 12, 0.8, 14, 1.4],
+          "line-opacity": 0.55
+        }
+      });
+
+      map.on("mousemove", "neighborhoods-fill", (event) => {
+        const feature = event.features && event.features[0];
+        map.getCanvas().style.cursor = "pointer";
+        if (!feature) return;
+        const info = describe(feature.properties);
+        place.textContent = `${info.title}, ${info.line} — ${info.crashes}`;
+      });
+      map.on("mouseleave", "neighborhoods-fill", () => {
+        map.getCanvas().style.cursor = "";
+        place.textContent = "Move over a neighborhood.";
+      });
+      map.on("click", "neighborhoods-fill", (event) => {
+        const feature = event.features && event.features[0];
+        if (!feature) return;
+        const info = describe(feature.properties);
+        new maplibregl.Popup({ closeButton: false, maxWidth: "260px" })
+          .setLngLat(event.lngLat)
+          .setHTML(`<strong>${escapeHtml(info.title)}</strong><br>${escapeHtml(info.line)}<br>${escapeHtml(info.crashes)}`)
+          .addTo(map);
+      });
+
+      applyYear();
+    });
+
+    yearSelect.addEventListener("change", applyYear);
+    applyYear();
+  </script>
+</body>
+</html>
